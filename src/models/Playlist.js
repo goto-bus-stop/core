@@ -1,13 +1,66 @@
 import mongoose from 'mongoose';
-import { createSchema } from 'mongoose-model-decorators';
+import { createSchema, pre, post } from 'mongoose-model-decorators';
+import createDebug from 'debug';
 
 import NotFoundError from '../errors/NotFoundError';
 import Page from '../Page';
 
 const Types = mongoose.Schema.Types;
+const debug = createDebug('uwave:core:playlist-model');
+
+const CURRENT_SCHEMA_VERSION = 2;
+
+/**
+ * Check if a playlist is an old-style playlist, with a `.media` property
+ * containing item IDs. New-style playlists have an `.items` property containing
+ * item objects.
+ *
+ * @param {Playlist} playlist
+ */
+function isOldStylePlaylist(playlist) {
+  return !playlist.version || playlist.version < CURRENT_SCHEMA_VERSION;
+}
+
+/**
+ * Upgrade a playlist from the old `.media` to the new `.items` storage style.
+ *
+ * @param {Playlist} playlist
+ */
+async function upgradePlaylist(playlist) {
+  debug('upgrading playlist', playlist._id);
+
+  const PlaylistItem = playlist.model('PlaylistItem');
+  const items = await PlaylistItem.find({
+    _id: { $in: playlist.media }
+  }).lean();
+
+  debug('# of items', items.length);
+
+  playlist.set('version', CURRENT_SCHEMA_VERSION);
+  playlist.set('items', items);
+  playlist.set('media', undefined);
+
+  debug('saving upgraded playlist...');
+  await playlist.save();
+}
 
 export default function playlistModel() {
   return (uw) => {
+    class PlaylistItem {
+      static timestamps = true;
+
+      static schema = {
+        _id: { type: Types.ObjectId, required: true },
+        media: { type: Types.ObjectId, ref: 'Media', required: true },
+        artist: { type: String, max: 128, required: true, index: true },
+        title: { type: String, max: 128, required: true, index: true },
+        start: { type: Number, min: 0, default: 0 },
+        end: { type: Number, min: 0, default: 0 }
+      };
+    }
+
+    const PlaylistItemSchema = createSchema({ minimize: false })(PlaylistItem);
+
     class Playlist {
       static timestamps = true;
       static toJSON = { getters: true };
@@ -19,21 +72,34 @@ export default function playlistModel() {
         shared: { type: Boolean, default: false },
         nsfw: { type: Boolean, default: false },
 
+        // Default to `-1` to identify old models that don't have a version.
+        // New models get a version number in the `setDefaultVersion` method.
+        version: { type: Number, default: -1 },
+
         // Old-style media references.
         media: [{ type: Types.ObjectId, ref: 'PlaylistItem', index: true }],
 
         // New-style embedded media objects.
-        items: [
-          {
-            _id: { type: Types.ObjectId, required: true },
-            media: { type: Types.ObjectId, ref: 'Media', required: true },
-            artist: { type: String, max: 128, required: true, index: true },
-            title: { type: String, max: 128, required: true, index: true },
-            start: { type: Number, min: 0, default: 0 },
-            end: { type: Number, min: 0, default: 0 }
-          }
-        ]
+        items: [new PlaylistItemSchema()]
       };
+
+      @post('init')
+      maybeUpgradePlaylist(doc, next) {
+        debug('post-init', doc.version);
+        if (isOldStylePlaylist(doc)) {
+          upgradePlaylist(doc).then(next);
+        }
+      }
+
+      @pre('save')
+      setDefaultVersion(next) {
+        // Only assign a version to new documents.
+        if (this.isNew && !this.version) {
+          this.version = CURRENT_SCHEMA_VERSION;
+        }
+
+        next();
+      }
 
       get size(): number {
         return this.media.length;

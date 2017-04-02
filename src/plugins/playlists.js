@@ -55,6 +55,7 @@ export class PlaylistsRepository {
     if (!playlist) {
       throw new NotFoundError('Playlist not found.');
     }
+
     return playlist;
   }
 
@@ -65,6 +66,7 @@ export class PlaylistsRepository {
     if (!playlist) {
       throw new NotFoundError('Playlist not found.');
     }
+
     return playlist;
   }
 
@@ -82,6 +84,7 @@ export class PlaylistsRepository {
   async getUserPlaylists(user) {
     const Playlist = this.uw.model('Playlist');
     const playlists = await Playlist.where('author').eq(user);
+
     return playlists;
   }
 
