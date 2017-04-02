@@ -6,8 +6,8 @@ const debug = require('debug')('uwave:advance');
 const ObjectId = MongoTypes.ObjectId;
 
 function cyclePlaylist(playlist) {
-  const item = playlist.media.shift();
-  playlist.media.push(item);
+  const item = playlist.items.shift();
+  playlist.items.push(item);
   return playlist.save();
 }
 
@@ -80,6 +80,7 @@ export class Booth {
 
   async getNextEntry(opts) {
     const HistoryEntry = this.uw.model('History');
+    const Media = this.uw.model('Media');
 
     const user = await this.getNextDJ(opts);
     if (!user) {
@@ -88,7 +89,9 @@ export class Booth {
     const playlist = await user.getActivePlaylist();
     const playlistItem = await playlist.getItemAt(0);
 
-    await playlistItem.populate('media').execPopulate();
+    if (!playlistItem.populated('media')) {
+      playlistItem.media = await Media.findById(playlistItem.media);
+    }
 
     return new HistoryEntry({
       user,

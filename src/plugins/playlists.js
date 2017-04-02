@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import groupBy from 'lodash/groupBy';
 import shuffle from 'lodash/shuffle';
 import escapeStringRegExp from 'escape-string-regexp';
@@ -33,12 +34,22 @@ function toPlaylistItem(itemProps, media) {
   const { artist, title } = itemProps;
   const { start, end } = getStartEnd(itemProps, media);
   return {
+    _id: new mongoose.Types.ObjectId(),
     media,
     artist: artist || media.artist,
     title: title || media.title,
     start,
     end
   };
+}
+
+function filterPlaylistItems(items, filter) {
+  if (!filter) {
+    return items;
+  }
+
+  const rx = new RegExp(escapeStringRegExp(filter), 'i');
+  return items.filter(item => rx.test(item.artist) || rx.test(item.title));
 }
 
 export class PlaylistsRepository {
@@ -96,7 +107,7 @@ export class PlaylistsRepository {
 
   async shufflePlaylist(playlistOrID) {
     const playlist = await this.getPlaylist(playlistOrID);
-    playlist.media = shuffle(playlist.media);
+    playlist.items = shuffle(playlist.items);
     return playlist.save();
   }
 
@@ -108,75 +119,52 @@ export class PlaylistsRepository {
     return {};
   }
 
-  async getPlaylistItemIDsFiltered(playlist, filter) {
-    const PlaylistItem = this.uw.model('PlaylistItem');
-    const rx = new RegExp(escapeStringRegExp(filter), 'i');
-    const matches = await PlaylistItem.where({
-      _id: { $in: playlist.media },
-      $or: [{ artist: rx }, { title: rx }]
-    }).select('_id');
-
-    const allItemIDs = matches.map(item => item.id);
-
-    // We want this sorted by the original playlist item order, so we can
-    // just walk through the original playlist and only keep the items that we
-    // need.
-    return playlist.media.filter(id => allItemIDs.indexOf(`${id}`) !== -1);
+  async getPlaylistItem(playlistOrID, itemID) {
+    const playlist = await this.getPlaylist(playlistOrID);
+    return this.getPlaylistItemAt(playlist,
+      playlist.items.findIndex(it => it.id === itemID));
   }
 
-  // eslint-disable-next-line class-methods-use-this
-  async getPlaylistItemIDsUnfiltered(playlist) {
-    return playlist.media;
-  }
-
-  async getPlaylistItem(itemID) {
-    const PlaylistItem = this.uw.model('PlaylistItem');
-
-    let item;
-    if (itemID instanceof PlaylistItem) {
-      item = itemID;
-    } else {
-      item = await PlaylistItem.findById(itemID);
-    }
+  async getPlaylistItemAt(playlistOrID, index) {
+    const Media = this.uw.model('Media');
+    const playlist = await this.getPlaylist(playlistOrID);
+    const item = playlist.items[index];
 
     if (!item) {
       throw new NotFoundError('Playlist item not found.');
     }
 
     if (!item.populated('media')) {
-      await item.populate('media').execPopulate();
+      item.media = await Media.findById(item.media);
     }
 
     return item;
   }
 
   async getPlaylistItems(playlistOrID, filter = null, pagination = null) {
-    const PlaylistItem = this.uw.model('PlaylistItem');
+    const Media = this.uw.model('Media');
     const playlist = await this.getPlaylist(playlistOrID);
-    const filteredItemIDs = filter
-      ? await this.getPlaylistItemIDsFiltered(playlist, filter)
-      : await this.getPlaylistItemIDsUnfiltered(playlist);
+    const allFilteredItems = filterPlaylistItems(playlist.items, filter);
 
-    let itemIDs = filteredItemIDs;
+    let filteredItems = allFilteredItems;
     if (pagination) {
       const start = pagination.offset;
       const end = start + pagination.limit;
-      itemIDs = itemIDs.slice(start, end);
+      filteredItems = filteredItems.slice(start, end);
     }
-    const items = itemIDs.length > 0
-      ? await PlaylistItem.find()
-        .where('_id').in(itemIDs)
-        .populate('media')
-      : [];
+    if (filteredItems.length > 0) {
+      const medias = await Media.find({
+        _id: { $in: filteredItems.map(item => item.media) }
+      });
+      filteredItems.forEach((item) => {
+        item.set('media', medias.find(media => media.id === `${item.media}`));
+      });
+    }
 
-    const results = itemIDs.map(itemID =>
-      items.find(item => `${item.id}` === `${itemID}`)
-    );
-
-    return new Page(results, {
+    return new Page(filteredItems, {
       pageSize: pagination ? pagination.limit : null,
-      filtered: filteredItemIDs.length,
-      total: playlist.media.length,
+      filtered: allFilteredItems.length,
+      total: playlist.size,
 
       current: pagination,
       next: pagination ? {
@@ -225,7 +213,6 @@ export class PlaylistsRepository {
    */
   async createPlaylistItems(items) {
     const Media = this.uw.model('Media');
-    const PlaylistItem = this.uw.model('PlaylistItem');
 
     if (!items.every(isValidPlaylistItem)) {
       throw new Error('Cannot add a playlist item without a proper media source type and ID.');
@@ -264,7 +251,7 @@ export class PlaylistsRepository {
 
     await Promise.all(promises);
 
-    return PlaylistItem.create(playlistItems);
+    return playlistItems;
   }
 
   /**
@@ -273,9 +260,9 @@ export class PlaylistsRepository {
   async addPlaylistItems(playlistOrID, items, { after = null } = {}) {
     const playlist = await this.getPlaylist(playlistOrID);
     const newItems = await this.createPlaylistItems(items);
-    const oldMedia = playlist.media;
+    const oldMedia = playlist.items;
     const insertIndex = oldMedia.findIndex(item => `${item}` === after);
-    playlist.media = [
+    playlist.items = [
       ...oldMedia.slice(0, insertIndex + 1),
       ...newItems,
       ...oldMedia.slice(insertIndex + 1)
@@ -286,7 +273,7 @@ export class PlaylistsRepository {
     return {
       added: newItems,
       afterID: after,
-      playlistSize: playlist.media.length
+      playlistSize: playlist.size
     };
   }
 
@@ -302,13 +289,14 @@ export class PlaylistsRepository {
     const playlist = await this.getPlaylist(playlistOrID);
 
     // First remove the given items,
-    const newMedia = playlist.media.filter(item =>
-      itemIDs.indexOf(`${item}`) === -1
-    );
+    const newMedia = playlist.items.filter(
+      item => itemIDs.indexOf(item.id) === -1);
+    const movedItems = playlist.items.filter(
+      item => itemIDs.indexOf(item.id) !== -1);
     // then reinsert them at their new position.
-    const insertIndex = newMedia.findIndex(item => `${item}` === afterID);
-    newMedia.splice(insertIndex + 1, 0, ...itemIDs);
-    playlist.media = newMedia;
+    const insertIndex = newMedia.findIndex(item => item.id === afterID);
+    newMedia.splice(insertIndex + 1, 0, ...movedItems);
+    playlist.items = newMedia;
 
     await playlist.save();
 
@@ -316,24 +304,23 @@ export class PlaylistsRepository {
   }
 
   async removePlaylistItems(playlistOrID, itemsOrIDs) {
-    const PlaylistItem = this.uw.model('PlaylistItem');
     const playlist = await this.getPlaylist(playlistOrID);
 
     // Only remove items that are actually in this playlist.
     const stringIDs = itemsOrIDs.map(item => String(item));
     const toRemove = [];
     const toKeep = [];
-    playlist.media.forEach((itemID) => {
-      if (stringIDs.indexOf(`${itemID}`) !== -1) {
-        toRemove.push(itemID);
+    playlist.items.forEach((item) => {
+      if (stringIDs.indexOf(item.id) !== -1) {
+        toRemove.push(item);
       } else {
-        toKeep.push(itemID);
+        toKeep.push(item);
       }
     });
 
-    playlist.media = toKeep;
+    playlist.items = toKeep;
     await playlist.save();
-    await PlaylistItem.remove({ _id: { $in: toRemove } });
+    // TODO Is the `toRemove` array useful for anything still?
 
     return {};
   }

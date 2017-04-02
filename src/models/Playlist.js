@@ -88,6 +88,8 @@ export default function playlistModel() {
         debug('post-init', doc.version);
         if (isOldStylePlaylist(doc)) {
           upgradePlaylist(doc).then(next);
+        } else {
+          next();
         }
       }
 
@@ -102,18 +104,18 @@ export default function playlistModel() {
       }
 
       get size(): number {
-        return this.media.length;
+        return this.items.length;
       }
 
       getItem(id) {
-        if (!this.media.some(item => `${item}` === `${id}`)) {
+        if (!this.items.some(item => `${item}` === `${id}`)) {
           throw new NotFoundError('Playlist item not found.');
         }
-        return uw.playlists.getPlaylistItem(id);
+        return uw.playlists.getPlaylistItem(this, id);
       }
 
       getItemAt(index): Promise {
-        return uw.playlists.getPlaylistItem(this.media[index]);
+        return uw.playlists.getPlaylistItemAt(this, index);
       }
 
       getItems(filter, page): Promise<Page> {
