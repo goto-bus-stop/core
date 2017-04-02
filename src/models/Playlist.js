@@ -18,7 +18,21 @@ export default function playlistModel() {
         author: { type: Types.ObjectId, ref: 'User', required: true, index: true },
         shared: { type: Boolean, default: false },
         nsfw: { type: Boolean, default: false },
-        media: [{ type: Types.ObjectId, ref: 'PlaylistItem', index: true }]
+
+        // Old-style media references.
+        media: [{ type: Types.ObjectId, ref: 'PlaylistItem', index: true }],
+
+        // New-style embedded media objects.
+        items: [
+          {
+            _id: { type: Types.ObjectId, required: true },
+            media: { type: Types.ObjectId, ref: 'Media', required: true },
+            artist: { type: String, max: 128, required: true, index: true },
+            title: { type: String, max: 128, required: true, index: true },
+            start: { type: Number, min: 0, default: 0 },
+            end: { type: Number, min: 0, default: 0 }
+          }
+        ]
       };
 
       get size(): number {
