@@ -1,5 +1,6 @@
 import groupBy from 'lodash/groupBy';
 import shuffle from 'lodash/shuffle';
+import uniq from 'lodash/uniq';
 import escapeStringRegExp from 'escape-string-regexp';
 
 import NotFoundError from '../errors/NotFoundError';
@@ -66,6 +67,30 @@ export class PlaylistsRepository {
       throw new NotFoundError('Playlist not found.');
     }
     return playlist;
+  }
+
+  async getUserPlaylistsContainingMedia(user, media) {
+    const Media = this.uw.model('Media');
+    const PlaylistItem = this.uw.model('PlaylistItem');
+
+    if (!(media instanceof Media)) {
+      throw new TypeError('Expected `media` to be a Media model instance');
+    }
+
+    const playlists = await this.getUserPlaylists(user);
+    const itemIDsToPlaylists = {};
+    playlists.forEach((playlist) => {
+      playlist.media.forEach((itemID) => {
+        itemIDsToPlaylists[itemID] = playlist;
+      });
+    });
+    const itemIDs = playlists.reduce((ids, playlist) => ids.concat(playlist.media), []);
+
+    const matchingItems = await PlaylistItem.where({
+      media: media._id,
+      _id: { $in: itemIDs }
+    }).select('_id');
+    return uniq(matchingItems.map((item) => itemIDsToPlaylists[item.id]));
   }
 
   async createPlaylist(user, { name }) {
